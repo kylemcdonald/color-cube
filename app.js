@@ -131,38 +131,93 @@ const U = {
   uM0: { value: new THREE.Matrix3() }, uM1: { value: new THREE.Matrix3() }, uM2: { value: new THREE.Matrix3() }, uMD: { value: new THREE.Matrix3() },
   uW: { value: new THREE.Vector3() }, uA: { value: 128 }, uRef: { value: 3 }, uOog: { value: 1 }, uDpr: { value: 1 },
   uC0: { value: new THREE.Color(ID.srgb) }, uC1: { value: new THREE.Color(ID.p3) }, uC2: { value: new THREE.Color(ID.adobe) }, uC3: { value: new THREE.Color(BOX_ID) },
+  uView: { value: 0 }, uVM: { value: new THREE.Matrix3() }, uVO: { value: new THREE.Vector3() }, uDec: { value: 0 }, uVX: { value: new THREE.Matrix3() }, uViewG: { value: -1 }, uDispG: { value: 0 },
 };
+// Fragments recover their color from the interpolated scene position (inverting the view map) rather than from an
+// interpolated Lab attribute, so gamut tests agree with the drawn geometry: in an RGB view, that space's gamut
+// boundary is a flat cube face and the cut lands exactly on it.
 const VERT = /* glsl */`
-  attribute vec3 lab; varying vec3 vLab;
-  void main() { vLab = lab; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`;
+  varying vec3 vPos;
+  void main() { vPos = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`;
 const FRAG = /* glsl */`
-  varying vec3 vLab;
-  uniform mat3 uM0, uM1, uM2, uMD; uniform vec3 uW; uniform float uA, uOpacity, uDpr;
-  uniform int uRef, uOog, uOutBox; uniform vec4 uMask; uniform vec3 uC0, uC1, uC2, uC3;
+  varying vec3 vPos;
+  uniform mat3 uM0, uM1, uM2, uMD, uVM, uVX; uniform vec3 uW, uVO; uniform float uA, uOpacity, uDpr;
+  uniform int uRef, uOog, uOutBox, uView, uDec, uViewG, uDispG; uniform vec4 uMask; uniform vec3 uC0, uC1, uC2, uC3;
   float finv(float t) { const float e = 6.0 / 29.0; return t > e ? t * t * t : 3.0 * e * e * (t - 4.0 / 29.0); }
+  float fwd(float t) { const float e = 6.0 / 29.0; return t > e * e * e ? pow(t, 1.0 / 3.0) : t / (3.0 * e * e) + 4.0 / 29.0; }
+  float dec(float x) {
+    float a = abs(x);
+    a = uDec == 1 ? (a <= 0.04045 ? a / 12.92 : pow((a + 0.055) / 1.055, 2.4)) : uDec == 2 ? pow(a, 563.0 / 256.0) : uDec == 3 ? a * a * a : a;
+    return sign(x) * a;
+  }
+  float finvp(float t) { const float e = 6.0 / 29.0; return t > e ? 3.0 * t * t : 3.0 * e * e; }
+  float fwdp(float t) { const float e = 6.0 / 29.0; return t > e * e * e ? pow(t, -2.0 / 3.0) / 3.0 : 1.0 / (3.0 * e * e); }
+  float decp(float x) {
+    float a = abs(x);
+    return uDec == 1 ? (a <= 0.04045 ? 1.0 / 12.92 : 2.4 / 1.055 * pow((a + 0.055) / 1.055, 1.4)) : uDec == 2 ? 563.0 / 256.0 * pow(a, 563.0 / 256.0 - 1.0) : uDec == 3 ? 3.0 * a * a : 1.0;
+  }
   float enc(float x) { x = clamp(x, 0.0, 1.0); return x <= 0.0031308 ? 12.92 * x : 1.055 * pow(x, 1.0 / 2.4) - 0.055; }
-  float sd(vec3 c) { vec3 d = min(c, 1.0 - c); return min(d.x, min(d.y, d.z)); }
-  float lmask(float s, float w) { return 1.0 - smoothstep(w - 0.6, w + 0.6, abs(s) / max(fwidth(s), 1e-9)); }
+  mat3 diag(vec3 v) { return mat3(v.x, 0.0, 0.0, 0.0, v.y, 0.0, 0.0, 0.0, v.z); }
+  // Contour widths use |s| / |grad s| with grad s from the chain rule, not fwidth(s): finite differences of a
+  // strongly curved s (linear light near black in an encoded view) are noise, while the position is affine.
+  vec3 dx, dy;
+  float pxDist(float s, vec3 g) { return abs(s) / max(length(vec2(dot(g, dx), dot(g, dy))), 1e-20); }
+  // Signed distance of c to the unit cube, and that distance in pixels given D = dc/dposition.
+  float sdg(vec3 c, mat3 D, out float px) {
+    float s = 1e9; vec3 g = vec3(0.0);
+    for (int i = 0; i < 3; i++) {
+      vec3 r = vec3(D[0][i], D[1][i], D[2][i]);
+      if (c[i] < s) { s = c[i]; g = r; }
+      if (1.0 - c[i] < s) { s = 1.0 - c[i]; g = r; }
+    }
+    px = pxDist(s, g);
+    return s;
+  }
+  float lmask(float px, float w) { return 1.0 - smoothstep(w - 0.6, w + 0.6, px); }
   void main() {
-    float fy = (vLab.x + 16.0) / 116.0;
-    vec3 xyz = uW * vec3(finv(fy + vLab.y / 500.0), finv(fy), finv(fy - vLab.z / 200.0));
+    dx = dFdx(vPos); dy = dFdy(vPos);
+    vec3 t = uVM * vPos + uVO, vLab, xyz;
+    mat3 J, JL; // d XYZ / d position, d Lab / d position
+    if (uView == 0) {
+      vLab = t;
+      float fy = (t.x + 16.0) / 116.0;
+      vec3 f = vec3(fy + t.y / 500.0, fy, fy - t.z / 200.0);
+      xyz = uW * vec3(finv(f.x), finv(f.y), finv(f.z));
+      JL = uVM;
+      J = diag(uW * vec3(finvp(f.x), finvp(f.y), finvp(f.z))) * mat3(vec3(1.0 / 116.0), vec3(1.0 / 500.0, 0.0, 0.0), vec3(0.0, 0.0, -1.0 / 200.0)) * uVM;
+    } else {
+      xyz = uVX * vec3(dec(t.x), dec(t.y), dec(t.z));
+      vec3 q = xyz / uW, f = vec3(fwd(q.x), fwd(q.y), fwd(q.z)), fp = vec3(fwdp(q.x), fwdp(q.y), fwdp(q.z)) / uW;
+      vLab = vec3(116.0 * f.y - 16.0, 500.0 * (f.x - f.y), 200.0 * (f.y - f.z));
+      J = uVX * diag(vec3(decp(t.x), decp(t.y), decp(t.z))) * uVM;
+      JL = mat3(vec3(0.0, 500.0 * fp.x, 0.0), vec3(116.0 * fp.y, -500.0 * fp.y, 200.0 * fp.y), vec3(0.0, 0.0, -200.0 * fp.z)) * J;
+    }
     vec3 d = uMD * xyz;
-    float s0 = sd(uM0 * xyz), s1 = sd(uM1 * xyz), s2 = sd(uM2 * xyz);
-    float sb = min(uA - abs(vLab.y), uA - abs(vLab.z));
-    float sout = uOutBox == 1 ? sb : uRef == 0 ? s0 : uRef == 1 ? s1 : uRef == 2 ? s2 : uRef == 3 ? sd(d) : 1.0;
+    float p0, p1, p2, pd, pv, pb;
+    float s0 = sdg(uM0 * xyz, uM0 * J, p0), s1 = sdg(uM1 * xyz, uM1 * J, p1), s2 = sdg(uM2 * xyz, uM2 * J, p2), sdisp = sdg(d, uMD * J, pd);
+    // An RGB view's own gamut is measured in its own coordinates: affine in position, so exact even near black.
+    float sv = sdg(t, uVM, pv);
+    if (uViewG == 0) { s0 = sv; p0 = pv; } else if (uViewG == 1) { s1 = sv; p1 = pv; } else if (uViewG == 2) { s2 = sv; p2 = pv; }
+    if (uViewG == uDispG) { sdisp = sv; pd = pv; }
+    float sa = uA - abs(vLab.y), sbb = uA - abs(vLab.z), sb = min(sa, sbb);
+    int bi = sa < sbb ? 1 : 2;
+    pb = pxDist(sb, vec3(JL[0][bi], JL[1][bi], JL[2][bi]));
+    float sout = uOutBox == 1 ? sb : uRef == 0 ? s0 : uRef == 1 ? s1 : uRef == 2 ? s2 : uRef == 3 ? sdisp : 1.0;
+    float pout = uOutBox == 1 ? pb : uRef == 0 ? p0 : uRef == 1 ? p1 : uRef == 2 ? p2 : pd;
     vec3 col = vec3(enc(d.r), enc(d.g), enc(d.b));
     float alpha = uOpacity;
     if (sout < 0.0) {
-      if (uOog == 3) discard;
+      // Cut-away meshes are already clipped on the CPU; this only trims where flat facets overshoot by over a pixel.
+      if (uOog == 3 && pout > 1.0) discard;
       if (uOog == 1) { float st = step(0.5, fract((gl_FragCoord.x + gl_FragCoord.y) / (7.0 * uDpr))); col = mix(col, vec3(0.42), 0.25 + 0.6 * st); }
       else if (uOog == 2) { col = vec3(0.3 + 0.25 * dot(col, vec3(0.3, 0.55, 0.15))); }
     }
     float w = 0.9 * uDpr, hw = 2.0 * uDpr;
-    vec4 S = vec4(s0, s1, s2, sb);
+    vec4 PX = vec4(p0, p1, p2, pb);
     vec3 CC[4]; CC[0] = uC0; CC[1] = uC1; CC[2] = uC2; CC[3] = uC3;
     for (int i = 0; i < 4; i++) {
       if (uMask[i] < 0.5) continue;
-      float h = lmask(S[i], hw), m = lmask(S[i], w);
+      float h = lmask(PX[i], hw), m = lmask(PX[i], w);
       col = mix(col, vec3(0.04), 0.85 * h); col = mix(col, CC[i], m);
       alpha = max(alpha, h);
     }
@@ -190,6 +245,20 @@ for (const key of [...GK, 'box']) {
 const sliceMat = { L: surfMat([1, 1, 1, 1], false), H: surfMat([1, 1, 1, 1], false), S: surfMat([1, 1, 1, 1], false) };
 const gridMat = new THREE.LineBasicMaterial({ color: 0x4a4a50 });
 
+// Inverse of the current view map: t = M·p + O, then either Lab = t, or Lab-white XYZ = X·dec(t).
+const I3 = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+const RGB_SCENE_INV = C.inv([[2 / S6 / S3, -1 / S6 / S3, -1 / S6 / S3], [1 / 3, 1 / 3, 1 / 3], [0, -1 / S2 / S3, 1 / S2 / S3]]);
+function viewInverse() {
+  const v = state.view;
+  if (v === 'lab' || v === 'labn') { const s = v === 'lab' ? 100 : 2 * A(); return { lab: true, M: [[0, 100, 0], [s, 0, 0], [0, 0, -s]], O: [50, 0, 0] }; }
+  if (v === 'xyz') return { M: I3, O: [0.5, 0.5, 0.5], X: C.lab.A };
+  if (v === 'oklab') {
+    const K = C.inv(C.OK2);
+    return { M: C.mmul(K, [[0, 1, 0], [1 / 3, 0, 0], [0, 0, -1 / 3]]), O: C.mul(K, [0.5, 0, 0]), dec: 3, X: C.mmul(C.lab.A, C.mmul(C.SPACES.srgb.toXYZ, C.inv(C.OK1))) };
+  }
+  const [g, kind] = v.split('_');
+  return { g, M: RGB_SCENE_INV, O: [0.5, 0.5, 0.5], dec: kind === 'enc' ? (g === 'adobe' ? 2 : 1) : 0, X: C.mmul(C.lab.A, C.SPACES[g].toXYZ) };
+}
 function updateUniforms() {
   const ms = GK.map((g) => C.labXyzToLin(g));
   U.uM0.value.copy(mat3(ms[0])); U.uM1.value.copy(mat3(ms[1])); U.uM2.value.copy(mat3(ms[2]));
@@ -199,6 +268,9 @@ function updateUniforms() {
   U.uRef.value = { srgb: 0, p3: 1, adobe: 2, disp: 3, none: -1 }[state.ref];
   U.uOog.value = { clip: 0, hatch: 1, grey: 2, hide: 3 }[state.oog];
   U.uDpr.value = DPR();
+  const vx = viewInverse();
+  U.uView.value = vx.lab ? 0 : 1; U.uDec.value = vx.dec || 0; U.uViewG.value = GK.indexOf(vx.g); U.uDispG.value = GK.indexOf(state.disp);
+  U.uVM.value.copy(mat3(vx.M)); U.uVO.value.set(...vx.O); U.uVX.value.copy(mat3(vx.X || I3));
   for (const key of [...GK, 'box']) OBJ[key].face.uniforms.uOpacity.value = state.faceOp;
   for (const m of Object.values(sliceMat)) {
     m.uniforms.uOpacity.value = state.sliceOp;
@@ -234,24 +306,79 @@ function edgeLines(key, n = 72) {
   return [mk(OBJ[key].casing, false, 1), mk(OBJ[key].core, true, 2)];
 }
 
-// Grid of (n+1)^2 points from fn(u, v) -> {xyz, lab}, triangulated.
-function gridMesh(n, fn, mat, quads) {
-  const pos = [], labs = [], idx = [];
-  let base = 0;
+// Half-spaces (each value >= 0 inside) that 'cut away' removes, for clipping meshes on the CPU.
+function clipFns(outBox) {
+  if (state.oog !== 'hide') return null;
+  if (outBox) { const a = A(); return (P) => [a - P.lab[1], a + P.lab[1], a - P.lab[2], a + P.lab[2]]; }
+  const g = state.ref === 'disp' ? state.disp : state.ref;
+  if (g === 'none') return null;
+  return (P) => { const l = C.xyzToLin(g, P.xyz); return [l[0], l[1], l[2], 1 - l[0], 1 - l[1], 1 - l[2]]; };
+}
+
+// n+1 knots on [0, 1] for one grid axis, given pt(s, w) -> scene position (s along the axis, w across it). Spaced
+// so the flat facets stray about equally far from the true surface (chord error ~ curvature·h², so density ~
+// sqrt(curvature), measured on a few cross-sections), half mixed with uniform spacing.
+function knots(n, pt) {
+  const m = 4 * n, W = 8, d2 = new Float64Array(m + 1);
+  for (let k = 0; k <= W; k++) {
+    const P = []; for (let i = 0; i <= m; i++) P.push(pt(i / m, k / W));
+    for (let i = 1; i < m; i++) d2[i] = Math.max(d2[i], Math.hypot(...[0, 1, 2].map((c) => P[i - 1][c] - 2 * P[i][c] + P[i + 1][c])));
+  }
+  d2[0] = d2[1]; d2[m] = d2[m - 1];
+  const dens = []; for (let i = 0; i < m; i++) dens.push(Math.sqrt((d2[i] + d2[i + 1]) / 2));
+  const mean = dens.reduce((a, b) => a + b, 0) / m || 1, cum = [0];
+  for (let i = 0; i < m; i++) cum.push(cum[i] + dens[i] + mean);
+  const out = [0];
+  for (let j = 1, i = 0; j < n; j++) {
+    const t = j / n * cum[m];
+    while (cum[i + 1] < t) i++;
+    out.push((i + (t - cum[i]) / (cum[i + 1] - cum[i])) / m);
+  }
+  out.push(1);
+  return out;
+}
+
+// Grid of (n+1)^2 points from fn(q, u, v) -> {xyz, lab}, triangulated. With `clip`, triangles are clipped in (u, v)
+// against each half-space, solving each crossing on the true surface by bisection, so cut edges end exactly on the
+// boundary instead of wherever the flat facets happen to cross it.
+function gridMesh(n, fn, mat, quads, clip = null) {
+  const pos = [], idx = [];
+  const id = (V) => V.id ?? (pos.push(...toScene(V.P)), V.id = pos.length / 3 - 1);
+  const vert = (q, u, v) => { const P = fn(q, u, v); return { u, v, P, g: clip?.(P) }; };
+  const cut = (q, A, B, k) => {
+    let lo = A.g[k] >= 0 ? A : B, hi = lo === A ? B : A; // order by side, so shared edges cut identically
+    let [u0, v0, u1, v1] = [lo.u, lo.v, hi.u, hi.v];
+    for (let it = 0; it < 32; it++) {
+      const um = (u0 + u1) / 2, vm = (v0 + v1) / 2, M = vert(q, um, vm);
+      if (M.g[k] >= 0) { lo = M; u0 = um; v0 = vm; } else { u1 = um; v1 = vm; }
+    }
+    return lo;
+  };
+  const tri = (q, poly) => {
+    if (clip) {
+      for (let k = 0; poly.length && k < poly[0].g.length; k++) {
+        if (poly.every((p) => p.g[k] >= 0)) continue;
+        const out = [];
+        poly.forEach((a, i) => {
+          const b = poly[(i + 1) % poly.length], ia = a.g[k] >= 0;
+          if (ia) out.push(a);
+          if (ia !== (b.g[k] >= 0)) out.push(cut(q, a, b, k));
+        });
+        poly = out;
+      }
+    }
+    for (let i = 1; i + 1 < poly.length; i++) idx.push(id(poly[0]), id(poly[i]), id(poly[i + 1]));
+  };
   for (const q of quads) {
-    for (let i = 0; i <= n; i++) for (let j = 0; j <= n; j++) {
-      const P = fn(q, i / n, j / n);
-      pos.push(...toScene(P)); labs.push(...P.lab);
-    }
+    const sc = (u, v) => toScene(fn(q, u, v)), us = knots(n, sc), vs = knots(n, (v, u) => sc(u, v)), G = [];
+    for (let i = 0; i <= n; i++) for (let j = 0; j <= n; j++) G.push(vert(q, us[i], vs[j]));
     for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
-      const a = base + i * (n + 1) + j, c = a + n + 1;
-      idx.push(a, c, a + 1, a + 1, c, c + 1);
+      const a = i * (n + 1) + j, c = a + n + 1;
+      tri(q, [G[a], G[c], G[a + 1]]); tri(q, [G[a + 1], G[c], G[c + 1]]);
     }
-    base += (n + 1) * (n + 1);
   }
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  g.setAttribute('lab', new THREE.Float32BufferAttribute(labs, 3));
   g.setIndex(idx);
   const m = new THREE.Mesh(g, mat); m.renderOrder = 5; return m;
 }
@@ -260,7 +387,7 @@ function cubeFaces(key, n) {
   return gridMesh(n, ({ ax, s }, u, v) => {
     const p = [0, 0, 0]; p[ax] = s; p[(ax + 1) % 3] = u; p[(ax + 2) % 3] = v;
     return paramPoint(key, p);
-  }, OBJ[key].face, FACES);
+  }, OBJ[key].face, FACES, clipFns(key !== 'box'));
 }
 
 const label = (text, pos, cls = '', color) => {
@@ -307,14 +434,14 @@ function rebuildSlices() {
   clearGroup(sliceGroup);
   const R = sliceR();
   if (state.showL) {
-    sliceGroup.add(gridMesh(64, (q, u, v) => labPt([state.L, (2 * u - 1) * R, (2 * v - 1) * R]), sliceMat.L, [0]));
+    sliceGroup.add(gridMesh(64, (q, u, v) => labPt([state.L, (2 * u - 1) * R, (2 * v - 1) * R]), sliceMat.L, [0], clipFns(false)));
   }
   if (state.showH) {
     const h = state.hue * Math.PI / 180, ca = Math.cos(h), sa = Math.sin(h);
-    sliceGroup.add(gridMesh(64, (q, u, v) => { const c = (2 * u - 1) * R; return labPt([v * 100, c * ca, c * sa]); }, sliceMat.H, [0]));
+    sliceGroup.add(gridMesh(64, (q, u, v) => { const c = (2 * u - 1) * R; return labPt([v * 100, c * ca, c * sa]); }, sliceMat.H, [0], clipFns(false)));
   }
   if (state.showS) {
-    sliceGroup.add(gridMesh(72, (q, u, v) => { const h = u * 2 * Math.PI, L = v * 100, c = surfC(L); return labPt([L, c * Math.cos(h), c * Math.sin(h)]); }, sliceMat.S, [0]));
+    sliceGroup.add(gridMesh(72, (q, u, v) => { const h = u * 2 * Math.PI, L = v * 100, c = surfC(L); return labPt([L, c * Math.cos(h), c * Math.sin(h)]); }, sliceMat.S, [0], clipFns(false)));
   }
 }
 
@@ -800,7 +927,7 @@ function set(patch, what = 'all') {
   save(); syncControls(); updateUniforms(); updateLegend();
   if (what === 'white') { C.setLabWhite(state.white); updateUniforms(); computeStats(); kCurves = null; }
   if (what === 'disp') { applyBg(); setupCanvases(); }
-  if (what !== 'slice' && what !== 'style') rebuildMain();
+  if (what !== 'slice') rebuildMain();
   rebuildSlices();
   if (what === 'style') { for (const c of [abCanvas, hCanvas, sCanvas]) c._cache = null; }
   drawSlices();
