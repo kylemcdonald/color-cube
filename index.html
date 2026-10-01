@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lab Box vs Gamuts</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #101011; --panel: #18181a; --line: #2a2a2e; --ink: #e6e6e6; --ink2: #a3a3a8; --ink3: #6c6c72;
+    --srgb: #eeeeee; --p3: #ff9a1f; --adobe: #22c7ff; --box: #ff3ddc; --bad: #ff5a5a;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font: 12px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #app { display: grid; grid-template-columns: 262px minmax(0, 1fr) 392px; height: 100vh; }
+  aside { background: var(--panel); overflow-y: auto; padding: 10px 12px 24px; }
+  #left { border-right: 1px solid var(--line); }
+  #right { border-left: 1px solid var(--line); }
+  h1 { font-size: 14px; margin: 0 0 2px; font-weight: 650; }
+  h2 { font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink3); margin: 14px 0 6px; font-weight: 600; border-top: 1px solid var(--line); padding-top: 10px; }
+  .sub { color: var(--ink2); margin: 0 0 4px; }
+  .row { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
+  .row > label:first-child { color: var(--ink2); min-width: 64px; }
+  input[type=range] { flex: 1; min-width: 0; accent-color: var(--box); }
+  input[type=number] { width: 62px; background: #0c0c0d; color: var(--ink); border: 1px solid var(--line); border-radius: 3px; padding: 2px 4px; font: 12px var(--mono); }
+  select { flex: 1; min-width: 0; background: #0c0c0d; color: var(--ink); border: 1px solid var(--line); border-radius: 3px; padding: 3px; font: inherit; }
+  button { background: #222226; color: var(--ink); border: 1px solid #333338; border-radius: 3px; padding: 3px 7px; font: inherit; cursor: pointer; }
+  button:hover { background: #2c2c31; }
+  .mono { font-family: var(--mono); }
+  .big { font: 600 15px var(--mono); }
+  .note { color: var(--ink3); font-size: 11px; margin: 4px 0; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { padding: 2px 3px; text-align: right; font-family: var(--mono); font-size: 11px; white-space: nowrap; }
+  th { color: var(--ink3); font: 600 10px system-ui, sans-serif; text-transform: uppercase; letter-spacing: .04em; }
+  td:first-child, th:first-child { text-align: left; font-family: inherit; }
+  tr + tr td { border-top: 1px solid #222225; }
+  .layers td { text-align: center; } .layers td:first-child { text-align: left; }
+  .chip { display: inline-block; width: 18px; height: 6px; border-radius: 2px; vertical-align: middle; margin-right: 5px; box-shadow: 0 0 0 1px #000; }
+  .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 2px; vertical-align: -2px; box-shadow: 0 0 0 1px #000a; }
+  .bad { color: var(--bad); }
+  .dim { color: var(--ink3); }
+  #view { position: relative; overflow: hidden; touch-action: none; }
+  #view canvas { display: block; }
+  #labels { position: absolute; inset: 0; pointer-events: none; }
+  .lbl { font: 600 11px var(--mono); text-shadow: 0 0 2px #000, 0 0 3px #000, 0 0 1px #000; white-space: nowrap; }
+  .lbl.ax { font-weight: 400; color: #9a9aa0; font-size: 10px; }
+  .lbl.axt { font-weight: 700; color: #c8c8cc; font-size: 11px; }
+  #legend { position: absolute; left: 10px; top: 10px; background: #0d0d0ecc; border: 1px solid var(--line); border-radius: 5px; padding: 7px 9px; pointer-events: none; max-width: 330px; backdrop-filter: blur(4px); }
+  #legend .t { font-weight: 650; margin-bottom: 3px; }
+  #legend div { margin: 1px 0; }
+  #camBtns { position: absolute; right: 10px; top: 10px; display: flex; gap: 4px; }
+  #hint { position: absolute; left: 10px; bottom: 8px; color: var(--ink3); font-size: 11px; pointer-events: none; }
+  .plot { position: relative; margin: 4px 0; }
+  .plot canvas { display: block; width: 100%; cursor: crosshair; border-radius: 3px; }
+  #readout { min-height: 92px; background: #0e0e0f; border: 1px solid var(--line); border-radius: 4px; padding: 5px 7px; }
+  #readout table td { font-size: 11px; }
+  #stats td, #stats th { padding: 2px 2px; font-size: 10.5px; }
+  #stats th { font-size: 9.5px; letter-spacing: 0; }
+  details summary { cursor: pointer; color: var(--ink2); margin: 8px 0 4px; }
+  #kchartWrap { position: relative; }
+  #ktip { position: absolute; pointer-events: none; background: #0d0d0ef0; border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; font: 11px var(--mono); display: none; white-space: nowrap; z-index: 2; }
+  @media (max-width: 1100px) {
+    #app { grid-template-columns: 1fr; height: auto; }
+    #view { height: 70vh; order: 1; }
+    #right { order: 2; border: 0; border-top: 1px solid var(--line); }
+    #left { order: 3; border: 0; border-top: 1px solid var(--line); }
+    aside { padding: 10px 16px 24px; }
+    #legend { max-width: calc(100% - 20px); font-size: 11px; }
+    #camBtns { top: auto; bottom: 30px; }
+  }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "./vendor/three/build/three.module.js",
+  "three/addons/": "./vendor/three/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="app">
+  <aside id="left">
+    <h1>Lab box vs RGB gamuts</h1>
+    <p class="sub">How the edges of a CIELAB code range line up with the sRGB, Display P3 and Adobe RGB (1998) gamut boundaries.</p>
+
+    <h2>Lab box</h2>
+    <div class="row"><label for="k">ab × k</label><input id="k" type="range" min="0.25" max="2" step="0.005"><input id="kNum" type="number" min="0.05" max="4" step="0.01"></div>
+    <div class="row"><label for="base">base ±</label><input id="base" type="number" min="10" max="300" step="1"><span class="note">a*, b* half-range at k = 1</span></div>
+    <div class="row" style="margin-top:6px"><span>L* ∈ [0, 100] &nbsp; a*, b* ∈ ±</span><span id="Aval" class="big" style="color:var(--box)"></span></div>
+    <div class="row"><label for="white">Lab white</label><select id="white"><option value="D65">D65 (no adaptation; skimage, OpenCV)</option><option value="D50">D50 + Bradford (ICC, CSS lab())</option></select></div>
+
+    <h2>3D view space</h2>
+    <div class="row"><select id="viewSel"></select></div>
+    <div class="row"><label><input type="checkbox" id="ortho"> orthographic</label><label><input type="checkbox" id="axes"> axes / grid</label></div>
+    <div class="row"><label for="bg">background</label><select id="bg"><option value="dark">near-black</option><option value="grey">L* 50 grey</option><option value="black">black</option></select></div>
+
+    <h2>Layers</h2>
+    <table class="layers">
+      <tr><th></th><th>edges</th><th>faces</th><th>labels</th></tr>
+      <tr data-o="srgb"><td><span class="chip" style="background:var(--srgb)"></span>sRGB</td><td><input type="checkbox" data-l="edges"></td><td><input type="checkbox" data-l="faces"></td><td><input type="checkbox" data-l="labels"></td></tr>
+      <tr data-o="p3"><td><span class="chip" style="background:var(--p3)"></span>Display P3</td><td><input type="checkbox" data-l="edges"></td><td><input type="checkbox" data-l="faces"></td><td><input type="checkbox" data-l="labels"></td></tr>
+      <tr data-o="adobe"><td><span class="chip" style="background:var(--adobe)"></span>Adobe RGB</td><td><input type="checkbox" data-l="edges"></td><td><input type="checkbox" data-l="faces"></td><td><input type="checkbox" data-l="labels"></td></tr>
+      <tr data-o="box"><td><span class="chip" style="background:var(--box)"></span>Lab box</td><td><input type="checkbox" data-l="edges"></td><td><input type="checkbox" data-l="faces"></td><td><input type="checkbox" data-l="labels"></td></tr>
+    </table>
+    <div class="row"><label for="faceOp">face α</label><input id="faceOp" type="range" min="0" max="1" step="0.01"></div>
+    <div class="row"><label>3D slices</label><label><input type="checkbox" id="showL"> L* plane</label><label><input type="checkbox" id="showH"> hue plane</label></div>
+    <div class="row"><label for="sliceOp">slice α</label><input id="sliceOp" type="range" min="0" max="1" step="0.01"></div>
+
+    <h2>Color rendering</h2>
+    <div class="row"><label for="disp">display as</label><select id="disp"><option value="srgb">sRGB</option><option value="p3">Display P3</option></select></div>
+    <div class="row"><label for="oog">outside</label><select id="oog"><option value="hatch">hatch</option><option value="grey">grey out</option><option value="hide">hide (cut away)</option><option value="clip">show clipped</option></select></div>
+    <div class="row"><label for="ref">gamut ref.</label><select id="ref"><option value="disp">display gamut</option><option value="srgb">sRGB</option><option value="p3">Display P3</option><option value="adobe">Adobe RGB</option><option value="none">none</option></select></div>
+    <p class="note">"Outside" on Lab-box faces and slices = outside the reference gamut. On gamut faces it means outside the Lab box: those colors can't be encoded.</p>
+    <p class="note" id="dispNote"></p>
+
+    <h2>Reading it</h2>
+    <p class="note">Each object is drawn as a cube with 12 edges. In CIELAB, the RGB cubes bend; switch the view to an RGB space and its cube becomes straight while the Lab box bends instead. Edge casing color tells you which space an edge belongs to. The core shows the actual color along that edge. Contour lines on surfaces mark where they cross another space's boundary, using that space's casing color.</p>
+    <p class="note">Volumes are in CIELAB units (ΔE*ab³), sampled on a 1 × 2.5 × 2.5 grid.</p>
+  </aside>
+
+  <main id="view">
+    <div id="labels"></div>
+    <div id="legend"></div>
+    <div id="camBtns"><button data-cam="iso">iso</button><button data-cam="top">top</button><button data-cam="front">front</button><button data-cam="side">side</button></div>
+    <div id="hint">drag: orbit · right-drag: pan · wheel: zoom</div>
+  </main>
+
+  <aside id="right">
+    <h2 style="border:0;margin-top:2px;padding-top:0">a*b* slice · L* = <span id="Lval" class="mono"></span></h2>
+    <div class="row"><input id="Lsl" type="range" min="0" max="100" step="0.5"></div>
+    <div class="plot" id="abWrap"></div>
+    <h2>Constant-hue slice · h = <span id="hval" class="mono"></span>° <span class="dim" style="text-transform:none;letter-spacing:0">(click the a*b* plot to set it)</span></h2>
+    <div class="row"><input id="hsl" type="range" min="0" max="180" step="0.5"></div>
+    <div class="plot" id="hWrap"></div>
+    <div id="readout"><span class="dim">Hover a slice to read the L*a*b* value and its RGB code values in each space.</span></div>
+
+    <h2>Coverage at k = <span id="kval2" class="mono"></span></h2>
+    <table id="stats"></table>
+    <div id="kchartWrap" class="plot"><div id="ktip"></div></div>
+    <p class="note"><b>Solid</b> lines show the % of each gamut inside the box (encodable). <b>Dashed</b> lines show the % of box volume that lands inside the gamut (code efficiency). Click the chart to set k.</p>
+
+    <details id="cornersDet"><summary>Gamut corners in L*a*b* (red = outside the box)</summary><table id="corners"></table></details>
+  </aside>
+</div>
+<script type="module" src="./app.js"></script>
+</body>
+</html>
