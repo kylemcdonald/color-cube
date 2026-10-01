@@ -26,7 +26,7 @@ const DEFAULTS = {
     adobe: { edges: true, faces: false, labels: true },
     box: { edges: true, faces: false, labels: true },
   },
-  faceOp: 0.3, sliceOp: 0.8, showL: true, showH: false, L: 50, hue: 135,
+  faceOp: 0.3, sliceOp: 0.8, showL: true, showH: false, showS: false, L: 50, hue: 135, sMode: 'sat', sat: 1, chroma: 60,
   disp: P3_OK ? 'p3' : 'srgb', oog: 'hatch', ref: 'disp',
 };
 let state = structuredClone(DEFAULTS);
@@ -187,7 +187,7 @@ for (const key of [...GK, 'box']) {
     face: isBox ? surfMat([1, 1, 1, 0], false) : surfMat([0, 0, 0, 1], true),
   };
 }
-const sliceMat = { L: surfMat([1, 1, 1, 1], false), H: surfMat([1, 1, 1, 1], false) };
+const sliceMat = { L: surfMat([1, 1, 1, 1], false), H: surfMat([1, 1, 1, 1], false), S: surfMat([1, 1, 1, 1], false) };
 const gridMat = new THREE.LineBasicMaterial({ color: 0x4a4a50 });
 
 function updateUniforms() {
@@ -272,6 +272,9 @@ const label = (text, pos, cls = '', color) => {
 const CORNER_NAMES = { 1: 'R', 2: 'G', 4: 'B', 6: 'C', 5: 'M', 3: 'Y' };
 
 const sliceR = () => Math.max(A(), 150);
+// Constant-saturation cone (C* = s·L*, CIE saturation s = C*/L*) or constant-chroma cylinder (C* = c).
+const surfC = (L) => (state.sMode === 'sat' ? state.sat * L : state.chroma);
+const surfLabel = () => (state.sMode === 'sat' ? `s = C*/L* = ${state.sat.toFixed(2)}` : `C* = ${fmt(state.chroma)}`);
 
 function rebuildMain() {
   clearGroup(mainGroup);
@@ -309,6 +312,9 @@ function rebuildSlices() {
   if (state.showH) {
     const h = state.hue * Math.PI / 180, ca = Math.cos(h), sa = Math.sin(h);
     sliceGroup.add(gridMesh(64, (q, u, v) => { const c = (2 * u - 1) * R; return labPt([v * 100, c * ca, c * sa]); }, sliceMat.H, [0]));
+  }
+  if (state.showS) {
+    sliceGroup.add(gridMesh(72, (q, u, v) => { const h = u * 2 * Math.PI, L = v * 100, c = surfC(L); return labPt([L, c * Math.cos(h), c * Math.sin(h)]); }, sliceMat.S, [0]));
   }
 }
 
@@ -377,8 +383,8 @@ function updateLegend() {
 }
 
 // ---------------------------------------------------------------- 2D slices
-const abWrap = $('#abWrap'), hWrap = $('#hWrap');
-let abCanvas, hCanvas;
+const abWrap = $('#abWrap'), hWrap = $('#hWrap'), sWrap = $('#sWrap');
+let abCanvas, hCanvas, sCanvas;
 const PLOT_PAD = { l: 30, r: 6, t: 6, b: 20 };
 function makeCanvas(wrap, aspect) {
   wrap.querySelector('canvas')?.remove();
@@ -396,6 +402,7 @@ function makeCanvas(wrap, aspect) {
 function setupCanvases() {
   abCanvas = makeCanvas(abWrap, 1);
   hCanvas = makeCanvas(hWrap, 0.62);
+  sCanvas = makeCanvas(sWrap, 0.5);
   drawSlices();
 }
 
@@ -494,6 +501,8 @@ function drawSlices() {
       stroke(ctx, pts, ID[g], 1.5);
     }
     stroke(ctx, [X.toPx(-a, -a), X.toPx(a, -a), X.toPx(a, a), X.toPx(-a, a)], BOX_ID, 1.8);
+    const sc = surfC(state.L);
+    if (sc > 0) { ctx.beginPath(); ctx.setLineDash([2, 3]); ctx.lineWidth = 1; ctx.strokeStyle = '#ffffffaa'; const [cx, cy] = X.toPx(0, 0); ctx.arc(cx, cy, sc * X.s, 0, 7); ctx.stroke(); ctx.setLineDash([]); }
     const e = X.R * 1.5;
     stroke(ctx, [X.toPx(-e * Math.cos(hr), -e * Math.sin(hr)), X.toPx(e * Math.cos(hr), e * Math.sin(hr))], '#ffffffaa', 1, [3, 3], false);
     const [hx, hy] = X.toPx(X.R * 0.86 * Math.cos(hr), X.R * 0.86 * Math.sin(hr));
@@ -521,7 +530,67 @@ function drawSlices() {
     stroke(ctx, [X.toPx(-bw, 0), X.toPx(bw, 0), X.toPx(bw, 100), X.toPx(-bw, 100)], BOX_ID, 1.8);
     const [, ly] = X.toPx(0, state.L);
     stroke(ctx, [[PLOT_PAD.l, ly], [c._w - PLOT_PAD.r, ly]], '#ffffffaa', 1, [3, 3], false);
+    for (const sgn of [1, -1]) {
+      const pts = []; for (let L = 0; L <= 100; L += 2) pts.push(X.toPx(sgn * surfC(L), L));
+      ctx.save(); ctx.beginPath(); ctx.rect(PLOT_PAD.l, PLOT_PAD.t, c._w - PLOT_PAD.l - PLOT_PAD.r, c._h - PLOT_PAD.t - PLOT_PAD.b); ctx.clip();
+      ctx.beginPath(); pts.forEach((p, i) => (i ? ctx.lineTo(...p) : ctx.moveTo(...p)));
+      ctx.setLineDash([2, 3]); ctx.lineWidth = 1; ctx.strokeStyle = '#ffffffaa'; ctx.stroke(); ctx.setLineDash([]); ctx.restore();
+    }
   }
+  drawSatSurface(keyBase);
+}
+
+// Unrolled saturation/chroma surface: x = hue 0–360°, y = L*.
+function sXform(c) {
+  const p = PLOT_PAD, w = c._w - p.l - p.r, h = c._h - p.t - p.b;
+  return {
+    toPx: (hue, L) => [p.l + hue / 360 * w, p.t + (1 - L / 100) * h],
+    toHL: (x, y) => [(x - p.l) / w * 360, (1 - (y - p.t) / h) * 100],
+    inside: (x, y) => x >= p.l && x <= c._w - p.r && y >= p.t && y <= c._h - p.b,
+  };
+}
+const surfLab = (hue, L) => { const c = surfC(L), r = hue * Math.PI / 180; return [L, c * Math.cos(r), c * Math.sin(r)]; };
+function drawSatSurface(keyBase) {
+  const c = sCanvas, X = sXform(c);
+  $('#sval').textContent = surfLabel();
+  const ctx = fillCanvas(c, `${keyBase}|${state.sMode}|${state.sat}|${state.chroma}`, (x, y) => (X.inside(x, y) ? surfLab(...X.toHL(x, y)) : null));
+  for (let hh = 0; hh <= 360; hh += 60) {
+    const [px] = X.toPx(hh, 0);
+    axisText(ctx, String(hh), px, c._h - PLOT_PAD.b + 4, hh === 360 ? 'right' : 'center');
+    ctx.fillStyle = '#ffffff22'; ctx.fillRect(px, PLOT_PAD.t, 0.5, c._h - PLOT_PAD.t - PLOT_PAD.b);
+  }
+  for (let L = 0; L <= 100; L += 25) { const [, py] = X.toPx(0, L); axisText(ctx, String(L), PLOT_PAD.l - 3, py, 'right', 'middle'); }
+  axisText(ctx, 'hue° →', c._w - PLOT_PAD.r - 4, c._h - PLOT_PAD.b - 14, 'right');
+  // Boundaries are traced by scanning columns and rows for in/out transitions, then bisecting.
+  const a = A(), x = [0, 0, 0];
+  const tests = GK.map((g) => { const M = C.labXyzToLin(g); return [ID[g], (lab) => (labXyzW(lab[0], lab[1], lab[2], x), inM(M, x))]; });
+  tests.push([BOX_ID, (lab) => Math.abs(lab[1]) <= a && Math.abs(lab[2]) <= a]);
+  const W = c._w - PLOT_PAD.l - PLOT_PAD.r, H = c._h - PLOT_PAD.t - PLOT_PAD.b;
+  for (const [color, ok] of tests) {
+    const pts = [];
+    const scan = (n, m, at) => {
+      for (let i = 0; i <= n; i++) {
+        let prev = ok(surfLab(...at(i / n, 0)));
+        for (let j = 1; j <= m; j++) {
+          const cur = ok(surfLab(...at(i / n, j / m)));
+          if (cur !== prev) {
+            let lo = (j - 1) / m, hi = j / m;
+            for (let k = 0; k < 10; k++) { const mid = (lo + hi) / 2; if (ok(surfLab(...at(i / n, mid))) === prev) lo = mid; else hi = mid; }
+            pts.push(at(i / n, (lo + hi) / 2));
+          }
+          prev = cur;
+        }
+      }
+    };
+    scan(Math.round(W), Math.round(H), (u, v) => [u * 360, v * 100]);
+    scan(Math.round(H), Math.round(W), (u, v) => [v * 360, u * 100]);
+    const px = pts.map(([hh, L]) => X.toPx(hh, L));
+    ctx.fillStyle = 'rgba(0,0,0,.85)'; for (const [qx, qy] of px) ctx.fillRect(qx - 1.6, qy - 1.6, 3.2, 3.2);
+    ctx.fillStyle = color; for (const [qx, qy] of px) ctx.fillRect(qx - 0.8, qy - 0.8, 1.6, 1.6);
+  }
+  const [hx] = X.toPx(state.hue, 0), [, ly] = X.toPx(0, state.L);
+  stroke(ctx, [[hx, PLOT_PAD.t], [hx, c._h - PLOT_PAD.b]], '#ffffffaa', 1, [3, 3], false);
+  stroke(ctx, [[PLOT_PAD.l, ly], [c._w - PLOT_PAD.r, ly]], '#ffffffaa', 1, [3, 3], false);
 }
 
 // hover readout + drag interactions
@@ -557,6 +626,10 @@ bindPlot(hWrap, (x, y) => {
   const X = hXform(hCanvas); if (!X.inside(x, y)) return null;
   const [cc, L] = X.toCL(x, y), hr = state.hue * Math.PI / 180; return [L, cc * Math.cos(hr), cc * Math.sin(hr)];
 }, (x, y) => { const [, L] = hXform(hCanvas).toCL(x, y); set({ L: Math.round(Math.min(100, Math.max(0, L)) * 2) / 2 }, 'slice'); });
+bindPlot(sWrap, (x, y) => { const X = sXform(sCanvas); return X.inside(x, y) ? surfLab(...X.toHL(x, y)) : null; }, (x, y) => {
+  const [hh, L] = sXform(sCanvas).toHL(x, y);
+  set({ hue: Math.round(Math.min(360, Math.max(0, hh)) * 2) / 2 % 360, L: Math.round(Math.min(100, Math.max(0, L)) * 2) / 2 }, 'slice');
+});
 
 // ---------------------------------------------------------------- volume statistics
 const GRID = { half: 320, n: 256 }; GRID.step = (2 * GRID.half) / GRID.n;
@@ -713,7 +786,8 @@ function syncControls() {
   $('#Aval').textContent = fmt(A(), 1);
   viewSel.value = state.view; $('#ortho').checked = state.ortho; $('#axes').checked = state.axes; $('#bg').value = state.bg;
   for (const tr of document.querySelectorAll('.layers tr[data-o]')) for (const cb of tr.querySelectorAll('input')) cb.checked = state.layers[tr.dataset.o][cb.dataset.l];
-  $('#faceOp').value = state.faceOp; $('#sliceOp').value = state.sliceOp; $('#showL').checked = state.showL; $('#showH').checked = state.showH;
+  $('#faceOp').value = state.faceOp; $('#sliceOp').value = state.sliceOp; $('#showL').checked = state.showL; $('#showH').checked = state.showH; $('#showS').checked = state.showS;
+  syncSurfControls();
   $('#disp').value = state.disp; $('#oog').value = state.oog; $('#ref').value = state.ref;
   $('#Lsl').value = state.L; $('#Lval').textContent = fmt(state.L); $('#hsl').value = state.hue % 180; $('#hval').textContent = fmt(state.hue);
   $('#dispNote').textContent = state.disp === 'p3'
@@ -728,7 +802,7 @@ function set(patch, what = 'all') {
   if (what === 'disp') { applyBg(); setupCanvases(); }
   if (what !== 'slice' && what !== 'style') rebuildMain();
   rebuildSlices();
-  if (what === 'style') { for (const c of [abCanvas, hCanvas]) c._cache = null; }
+  if (what === 'style') { for (const c of [abCanvas, hCanvas, sCanvas]) c._cache = null; }
   drawSlices();
   if (what !== 'slice' && what !== 'style') updateStats();
 }
@@ -748,6 +822,16 @@ $('#faceOp').addEventListener('input', (e) => { state.faceOp = num(e.target); sa
 $('#sliceOp').addEventListener('input', (e) => { state.sliceOp = num(e.target); save(); updateUniforms(); });
 $('#showL').addEventListener('change', (e) => set({ showL: e.target.checked }, 'slice'));
 $('#showH').addEventListener('change', (e) => set({ showH: e.target.checked }, 'slice'));
+$('#showS').addEventListener('change', (e) => set({ showS: e.target.checked }, 'slice'));
+const SURF_RANGE = { sat: { min: 0, max: 5, step: 0.01, key: 'sat' }, chroma: { min: 0, max: 200, step: 0.5, key: 'chroma' } };
+function syncSurfControls() {
+  const r = SURF_RANGE[state.sMode];
+  $('#sMode').value = state.sMode;
+  for (const el of [$('#ssl'), $('#sNum')]) { el.min = r.min; el.max = r.max; el.step = r.step; el.value = state[r.key]; }
+}
+$('#sMode').addEventListener('change', (e) => set({ sMode: e.target.value }, 'slice'));
+$('#ssl').addEventListener('input', (e) => set({ [SURF_RANGE[state.sMode].key]: num(e.target) }, 'slice'));
+$('#sNum').addEventListener('change', (e) => { const v = num(e.target); if (v >= 0) set({ [SURF_RANGE[state.sMode].key]: v }, 'slice'); });
 $('#disp').addEventListener('change', (e) => set({ disp: e.target.value }, 'disp'));
 $('#oog').addEventListener('change', (e) => set({ oog: e.target.value }, 'style'));
 $('#ref').addEventListener('change', (e) => set({ ref: e.target.value }, 'style'));

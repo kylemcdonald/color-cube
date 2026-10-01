@@ -103,7 +103,7 @@
       <tr data-o="box"><td><span class="chip" style="background:var(--box)"></span>Lab box</td><td><input type="checkbox" data-l="edges"></td><td><input type="checkbox" data-l="faces"></td><td><input type="checkbox" data-l="labels"></td></tr>
     </table>
     <div class="row"><label for="faceOp">face α</label><input id="faceOp" type="range" min="0" max="1" step="0.01"></div>
-    <div class="row"><label>3D slices</label><label><input type="checkbox" id="showL"> L* plane</label><label><input type="checkbox" id="showH"> hue plane</label></div>
+    <div class="row" style="flex-wrap:wrap"><label>3D slices</label><label><input type="checkbox" id="showL"> L*</label><label><input type="checkbox" id="showH"> hue</label><label><input type="checkbox" id="showS"> sat. surface</label></div>
     <div class="row"><label for="sliceOp">slice α</label><input id="sliceOp" type="range" min="0" max="1" step="0.01"></div>
 
     <h2>Color rendering</h2>
@@ -132,6 +132,9 @@
     <h2>Constant-hue slice · h = <span id="hval" class="mono"></span>° <span class="dim" style="text-transform:none;letter-spacing:0">(click the a*b* plot to set it)</span></h2>
     <div class="row"><input id="hsl" type="range" min="0" max="180" step="0.5"></div>
     <div class="plot" id="hWrap"></div>
+    <h2>Saturation surface · <span id="sval" class="mono" style="text-transform:none;letter-spacing:0"></span></h2>
+    <div class="row"><select id="sMode" style="flex:0 0 auto"><option value="sat">cone: C*/L* const</option><option value="chroma">cylinder: C* const</option></select><input id="ssl" type="range"><input id="sNum" type="number"></div>
+    <div class="plot" id="sWrap"></div>
     <div id="readout"><span class="dim">Hover a slice to read the L*a*b* value and its RGB code values in each space.</span></div>
 
     <h2>Coverage at k = <span id="kval2" class="mono"></span></h2>
