@@ -5,6 +5,7 @@ import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import * as C from './colormath.js';
+import { readImage } from './cloud.js';
 
 // All colors are computed by hand already encoded for the display; three must not convert them.
 THREE.ColorManagement.enabled = false;
@@ -28,6 +29,7 @@ const DEFAULTS = {
   },
   faceOp: 0.3, sliceOp: 0.8, showL: true, showH: false, showS: false, L: 50, hue: 135, sMode: 'sat', sat: 1, chroma: 60,
   disp: P3_OK ? 'p3' : 'srgb', oog: 'hatch', ref: 'disp',
+  cloudOn: true, cloudAlpha: -0.6, cloudSpace: 'auto',
 };
 let state = structuredClone(DEFAULTS);
 try {
@@ -445,6 +447,71 @@ function rebuildSlices() {
   }
 }
 
+// ---------------------------------------------------------------- image point cloud
+// One point per unique 8-bit color. A color seen n times gets alpha 1 - (1 - α)^n, which is what n stacked points
+// of alpha α would blend to, so density reads the same as drawing every pixel.
+const cloudMat = new THREE.ShaderMaterial({
+  uniforms: { uAlpha: { value: 0.25 }, uSize: { value: 1 } },
+  vertexShader: /* glsl */`
+    attribute vec3 aCol; attribute float aCount; uniform float uAlpha, uSize; varying vec4 vC;
+    void main() {
+      vC = vec4(aCol, 1.0 - pow(1.0 - uAlpha, aCount));
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = uSize;
+    }`,
+  fragmentShader: /* glsl */`varying vec4 vC; void main() { gl_FragColor = vC; }`,
+  transparent: true, depthWrite: false,
+});
+const cloudPts = new THREE.Points(new THREE.BufferGeometry(), cloudMat);
+cloudPts.renderOrder = 4; cloudPts.frustumCulled = false;
+scene.add(cloudPts);
+let cloudImg = null, cloudKey = '';
+// 1 CSS px, or 0.5 CSS px on high-density screens (one device pixel at 2x).
+const cloudSize = () => (DPR() >= 2 ? 0.5 : 1) * DPR();
+const cloudSpace = () => (state.cloudSpace === 'auto' ? cloudImg?.space || 'srgb' : state.cloudSpace);
+function updateCloud() {
+  cloudMat.uniforms.uAlpha.value = Math.pow(10, state.cloudAlpha);
+  cloudMat.uniforms.uSize.value = cloudSize();
+  cloudPts.visible = !!cloudImg && state.cloudOn;
+  if (!cloudPts.visible) return;
+  const g = cloudSpace();
+  const key = [cloudImg.id, g, state.view, state.white, state.disp, state.view === 'labn' ? A() : ''].join('|');
+  if (key === cloudKey) return;
+  cloudKey = key;
+  const { keys, counts } = cloudImg, n = keys.length, lut = Array.from({ length: 256 }, (_, i) => C.SPACES[g].dec(i / 255));
+  const pos = new Float32Array(3 * n), col = new Float32Array(3 * n), map = VIEWS[state.view].map;
+  for (let i = 0; i < n; i++) {
+    const k = keys[i], xyz = C.linToXyz(g, [lut[k >>> 16], lut[(k >>> 8) & 255], lut[k & 255]]);
+    pos.set(map(xyz, C.xyzToLab(xyz)), 3 * i);
+    col.set(dispRGB(xyz), 3 * i);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('aCol', new THREE.BufferAttribute(col, 3));
+  geo.setAttribute('aCount', new THREE.BufferAttribute(counts, 1));
+  cloudPts.geometry.dispose(); cloudPts.geometry = geo;
+}
+function cloudInfo() {
+  const el = $('#cloudInfo');
+  if (!cloudImg) { el.textContent = "Drop an image anywhere on the page to plot each pixel's color as a point."; return; }
+  const c = cloudImg, sp = NAME[cloudSpace()];
+  const src = state.cloudSpace !== 'auto' ? 'set by hand' : c.space ? `from ${c.how}` : `${c.how}, assumed`;
+  el.innerHTML = `<b>${escapeHtml(c.name)}</b> · ${c.w}×${c.h}${c.step > 1 ? ` (every ${c.step}th pixel)` : ''}<br>
+    ${c.n.toLocaleString()} px · ${c.keys.length.toLocaleString()} unique colors<br>pixels read as <b>${sp}</b> <span class="dim">(${escapeHtml(src)})</span>`;
+}
+const escapeHtml = (t) => t.replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[ch]);
+async function loadCloud(file) {
+  if (!file) return;
+  $('#cloudInfo').textContent = `Reading ${file.name}…`;
+  try {
+    cloudImg = { ...(await readImage(file)), id: Date.now() };
+  } catch (err) {
+    $('#cloudInfo').innerHTML = `<span class="bad">Couldn't read ${escapeHtml(file.name)}: ${escapeHtml(String(err.message || err))}</span>`;
+    return;
+  }
+  state.cloudOn = true; save(); syncControls(); updateLegend(); updateCloud();
+}
+
 // ---------------------------------------------------------------- axes per view
 const fmt = (v, d = 1) => (Math.abs(v) < 1e-9 ? 0 : v).toFixed(d);
 function labGrid(norm) {
@@ -506,7 +573,8 @@ function updateLegend() {
     <div><span class="chip" style="background:${BOX_ID}"></span>Lab box L* 0–100, a*b* ±${fmt(A(), 1)} &nbsp;<span class="dim">(${state.white})</span></div>
     <div class="dim">Edge casing = space · core = true color (clipped to ${state.disp === 'p3' ? 'P3' : 'sRGB'})</div>
     <div class="dim">Box faces &amp; slices outside ${refName}: ${oog} · gamut faces outside box: ${oog}</div>
-    <div class="dim">Thin contour lines = crossing of that space's boundary</div>`;
+    <div class="dim">Thin contour lines = crossing of that space's boundary</div>
+    ${cloudImg && state.cloudOn ? `<div class="dim">Points = pixels of ${escapeHtml(cloudImg.name)}, read as ${NAME[cloudSpace()]}</div>` : ''}`;
 }
 
 // ---------------------------------------------------------------- 2D slices
@@ -916,6 +984,8 @@ function syncControls() {
   $('#faceOp').value = state.faceOp; $('#sliceOp').value = state.sliceOp; $('#showL').checked = state.showL; $('#showH').checked = state.showH; $('#showS').checked = state.showS;
   syncSurfControls();
   $('#disp').value = state.disp; $('#oog').value = state.oog; $('#ref').value = state.ref;
+  $('#cloudOn').checked = state.cloudOn; $('#cloudSpace').value = state.cloudSpace; $('#cloudAlpha').value = state.cloudAlpha;
+  $('#cloudAlphaVal').textContent = Math.pow(10, state.cloudAlpha).toPrecision(2); cloudInfo();
   $('#Lsl').value = state.L; $('#Lval').textContent = fmt(state.L); $('#hsl').value = state.hue % 180; $('#hval').textContent = fmt(state.hue);
   $('#dispNote').textContent = state.disp === 'p3'
     ? (GL_P3 && P3_OK ? 'Rendering in Display P3: colors outside sRGB are shown as they are.' : 'Display P3 is selected, but this screen or browser reports no P3 support, so colors may be clamped.')
@@ -932,6 +1002,7 @@ function set(patch, what = 'all') {
   if (what === 'style') { for (const c of [abCanvas, hCanvas, sCanvas]) c._cache = null; }
   drawSlices();
   if (what !== 'slice' && what !== 'style') updateStats();
+  updateCloud();
 }
 const num = (el) => parseFloat(el.value);
 $('#k').addEventListener('input', (e) => set({ k: num(e.target) }, 'k'));
@@ -964,6 +1035,23 @@ $('#oog').addEventListener('change', (e) => set({ oog: e.target.value }, 'style'
 $('#ref').addEventListener('change', (e) => set({ ref: e.target.value }, 'style'));
 $('#Lsl').addEventListener('input', (e) => set({ L: num(e.target) }, 'slice'));
 $('#hsl').addEventListener('input', (e) => set({ hue: num(e.target) }, 'slice'));
+$('#cloudOn').addEventListener('change', (e) => { state.cloudOn = e.target.checked; save(); updateLegend(); updateCloud(); });
+$('#cloudSpace').addEventListener('change', (e) => { state.cloudSpace = e.target.value; save(); syncControls(); updateLegend(); updateCloud(); });
+$('#cloudAlpha').addEventListener('input', (e) => { state.cloudAlpha = num(e.target); save(); syncControls(); updateCloud(); });
+$('#cloudPick').addEventListener('click', () => $('#cloudFile').click());
+$('#cloudFile').addEventListener('change', (e) => { loadCloud(e.target.files[0]); e.target.value = ''; });
+$('#cloudClear').addEventListener('click', () => { cloudImg = null; cloudKey = ''; syncControls(); updateLegend(); updateCloud(); });
+// Drag and drop anywhere on the page. dragenter/leave fire per child element, so count depth.
+let dragDepth = 0;
+const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+window.addEventListener('dragenter', (e) => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth++; document.body.classList.add('dragging'); });
+window.addEventListener('dragleave', (e) => { if (!hasFiles(e)) return; if (--dragDepth <= 0) { dragDepth = 0; document.body.classList.remove('dragging'); } });
+window.addEventListener('dragover', (e) => { if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
+window.addEventListener('drop', (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault(); dragDepth = 0; document.body.classList.remove('dragging');
+  loadCloud([...e.dataTransfer.files].find((f) => f.type.startsWith('image/')) || e.dataTransfer.files[0]);
+});
 
 function applyBg() {
   const bg = { dark: 0x161618, grey: 0x777777, black: 0x000000 }[state.bg];
@@ -984,6 +1072,7 @@ function resize() {
   }
   for (const m of lineMats) m.resolution.set(w, h);
   U.uDpr.value = DPR();
+  cloudMat.uniforms.uSize.value = cloudSize();
 }
 let resizeT = 0;
 new ResizeObserver(() => {

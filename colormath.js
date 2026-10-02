@@ -47,7 +47,7 @@ for (const s of Object.values(SPACES)) {
 
 // Bradford D65 -> D50
 const BFD = [[0.8951, 0.2664, -0.1614], [-0.7502, 1.7135, 0.0367], [0.0389, -0.0685, 1.0296]];
-function bradford(src, dst) {
+export function bradford(src, dst) {
   const s = mul(BFD, src), d = mul(BFD, dst);
   return mmul(inv(BFD), mmul([[d[0] / s[0], 0, 0], [0, d[1] / s[1], 0], [0, 0, d[2] / s[2]]], BFD));
 }

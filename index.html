@@ -50,6 +50,8 @@
   #legend .t { font-weight: 650; margin-bottom: 3px; }
   #legend div { margin: 1px 0; }
   #camBtns { position: absolute; right: 10px; top: 10px; display: flex; gap: 4px; }
+  #drop { position: absolute; inset: 8px; border: 2px dashed var(--ink2); border-radius: 8px; background: #101011aa; display: none; align-items: center; justify-content: center; font-size: 15px; color: var(--ink); pointer-events: none; z-index: 3; }
+  body.dragging #drop { display: flex; }
   #hint { position: absolute; left: 10px; bottom: 8px; color: var(--ink3); font-size: 11px; pointer-events: none; }
   .plot { position: relative; margin: 4px 0; }
   .plot canvas { display: block; width: 100%; cursor: crosshair; border-radius: 3px; }
@@ -106,6 +108,12 @@
     <div class="row" style="flex-wrap:wrap"><label>3D slices</label><label><input type="checkbox" id="showL"> L*</label><label><input type="checkbox" id="showH"> hue</label><label><input type="checkbox" id="showS"> sat. surface</label></div>
     <div class="row"><label for="sliceOp">slice α</label><input id="sliceOp" type="range" min="0" max="1" step="0.01"></div>
 
+    <h2>Image point cloud</h2>
+    <div class="row"><button id="cloudPick">open image…</button><input type="file" id="cloudFile" accept="image/*" hidden><label><input type="checkbox" id="cloudOn"> show</label><button id="cloudClear" style="margin-left:auto">clear</button></div>
+    <div class="row"><label for="cloudSpace">pixels in</label><select id="cloudSpace"><option value="auto">auto (embedded profile)</option><option value="srgb">sRGB</option><option value="p3">Display P3</option><option value="adobe">Adobe RGB</option></select></div>
+    <div class="row"><label for="cloudAlpha">point α</label><input id="cloudAlpha" type="range" min="-3" max="0" step="0.01"><span id="cloudAlphaVal" class="mono" style="min-width:38px;text-align:right"></span></div>
+    <p class="note" id="cloudInfo">Drop an image anywhere on the page to plot each pixel's color as a point.</p>
+
     <h2>Color rendering</h2>
     <div class="row"><label for="disp">display as</label><select id="disp"><option value="srgb">sRGB</option><option value="p3">Display P3</option></select></div>
     <div class="row"><label for="oog">outside</label><select id="oog"><option value="hatch">hatch</option><option value="grey">grey out</option><option value="hide">hide (cut away)</option><option value="clip">show clipped</option></select></div>
@@ -122,7 +130,8 @@
     <div id="labels"></div>
     <div id="legend"></div>
     <div id="camBtns"><button data-cam="iso">iso</button><button data-cam="top">top</button><button data-cam="front">front</button><button data-cam="side">side</button></div>
-    <div id="hint">drag: orbit · right-drag: pan · wheel: zoom</div>
+    <div id="hint">drag: orbit · right-drag: pan · wheel: zoom · drop an image to plot its pixels</div>
+    <div id="drop">Drop an image to plot its pixels</div>
   </main>
 
   <aside id="right">

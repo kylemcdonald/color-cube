@@ -10,6 +10,9 @@ Interactive 3D tool for seeing how the edges of a CIELAB code range (L* 0–100,
 - 2D a*b* and constant-hue slices, plus a hover readout of 8-bit code values in each space.
 - Coverage stats against k: the share of each gamut inside the box, and the share of the box filled by each gamut.
 - Lab white: D65, or D50 with Bradford adaptation.
+- Drop an image on the page to plot each pixel's color as a point cloud. Raw code values are read in the space of the embedded profile (sRGB, Display P3 or Adobe RGB, auto-detected), with a manual override and a point-alpha control.
 - Renders in Display P3 where supported.
 
 No build step. Serve the directory with any static server, e.g. `python3 -m http.server`. three.js r160 is vendored in `vendor/` (MIT).
+
+`scripts/lightness_slice.py` writes a square PNG that spans one L* slice of a gamut: the slice polygon in linear RGB, Coons-mapped onto the square, encoded, with an embedded ICC profile. `examples/adobe-L62.75.png` is `python3 scripts/lightness_slice.py --L 62.75 --space adobe`.
